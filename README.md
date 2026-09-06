@@ -1,54 +1,100 @@
-# 音乐转 MP3
+# 音乐转 MP3 🎵
 
-一个简洁、快速、完全本地运行的 Windows 音频转换工具。
+一个轻量、快速、完全本地运行的 Windows 音频转换工具。它使用原生 C++ 和 Win32 界面，支持批量导入、拖拽转换、NCM 解码以及多种输出码率选择。
 
-支持将常见音频格式批量转换为 MP3，也支持网易云音乐 `.ncm` 文件解码。文件不会上传到网络，转换过程和输出目录都由用户控制。
+> 📦 下载即用：仓库中的 `MusicToMp3Native-Single.exe` 是不依赖 FFmpeg、MinGW 或 .NET 的单文件版本，复制到其他 Windows 电脑即可运行。
 
-## 功能
+## ✨ 功能特性
 
-- 支持拖拽添加文件、选择文件夹或批量选择音频
-- 支持 `.aac`、`.ape`、`.aiff`、`.flac`、`.m4a`、`.mp4`、`.ncm`、`.ogg`、`.opus`、`.wav`、`.wma`
-- 支持智能模式、高质量 VBR 和固定码率
-- 尽量保留标题、艺术家和专辑等元数据
-- 转换过程中显示当前文件和整体进度
-- 添加新文件或开始新一轮转换时，进度条自动归零
-- 转换失败的文件会单独列出，不影响其他文件继续处理
+- 📁 添加单个文件、整个文件夹或直接拖拽导入
+- ⚡ 后台扫描和批量转换，避免转换期间窗口卡死
+- 📊 当前文件进度、总体进度和转换状态实时显示
+- 🎧 支持 NCM AES/RC4 解码
+- 🔊 通过 FFmpeg API 在进程内完成解码和 MP3 编码
+- 🎚️ 支持 128、192、256、320 kbps 等输出码率
+- 💾 可自定义输出目录，默认保存到用户音乐目录
+- 🧾 尽量保留标题、艺术家、专辑等音频元数据
+- 🛠️ 失败文件单独列出并显示原因，不影响其他文件继续转换
+- 🖥️ 原生 Windows 界面、高清 DPI 适配和应用图标
+- 🔒 全程本地处理，不上传音乐文件和转换记录
 
-## 下载使用
+## 🎼 支持格式
 
-请前往 [Releases](https://github.com/crazyzhang277/MusicMP3/releases) 下载最新的 `音乐转MP3-win-x64.zip`。
+可导入常见音频格式，包括：
 
-压缩包已经内置 .NET 运行时和 FFmpeg，Windows 电脑无需另外安装 .NET、FFmpeg 或 Python。下载并解压后，双击 `音乐转MP3.exe`，拖入音乐文件，选择输出目录和码率，再点击“开始转换”。
+`.aac` · `.ape` · `.aiff` · `.flac` · `.m4a` · `.mp4` · `.ncm` · `.ogg` · `.opus` · `.wav` · `.wma` · `.mp3`
 
-## 从源码构建
+所有输入最终输出为 `.mp3`。已有 MP3 文件在选择新的码率时会重新编码，以确保码率选择真正生效。
 
-需要安装 .NET 8 SDK，然后在项目目录执行：
+## 🚀 快速使用
+
+1. 从 [Releases](https://github.com/crazyzhang277/MusicMP3/releases) 下载最新的 `MusicToMp3Native-Single.exe`。
+2. 双击运行，无需安装运行库。
+3. 点击“添加文件”或“添加文件夹”，也可以把音乐拖到窗口中。
+4. 选择输出目录和目标码率。
+5. 点击“开始转换”，等待任务完成。
+
+转换失败时，程序会保留其他成功结果，并在界面中列出失败文件和错误详情。
+
+## 🧱 技术实现
+
+- **界面**：C++20、Win32 API、Common Controls
+- **音频处理**：裁剪版静态 FFmpeg API
+- **NCM 解码**：AES-128-ECB 和 RC4 兼容实现
+- **并发模型**：后台工作线程 + UI 消息回调
+- **发布方式**：静态链接 FFmpeg、MinGW 运行库和 MP3 编码器，生成单 exe
+
+## 🛠️ 从源码构建
+
+### 环境要求
+
+- Windows 10/11 x64
+- MSYS2 UCRT64
+- CMake 3.25 或更高版本
+- Ninja
+- 裁剪版 FFmpeg 开发库
+
+### 构建单文件版本
+
+在仓库根目录执行：
 
 ```powershell
-dotnet build
-dotnet run
+cmake -S MusicToMp3Native -B MusicToMp3Native/build-single -G Ninja `
+  -DMUSICMP3_STATIC_FFMPEG=ON `
+  -DMUSICMP3_FFMPEG_ROOT=D:/msys64/usr/local
+cmake --build MusicToMp3Native/build-single --config Release
 ```
 
-生成无需安装 .NET 的自包含版本：
+构建结果位于 `MusicToMp3Native/build-single/`，复制并重命名为仓库根目录的 `MusicToMp3Native-Single.exe` 即可发布。
+
+### 动态 FFmpeg 调试版本
+
+如果只需要快速调试 UI 或业务逻辑，可以使用动态库配置：
 
 ```powershell
-dotnet publish MusicToMp3.csproj -c Release -r win-x64 `
-  --self-contained true `
-  -p:PublishSingleFile=true `
-  -p:IncludeNativeLibrariesForSelfExtract=true
+cmake -S MusicToMp3Native -B MusicToMp3Native/build-dynamic -G Ninja `
+  -DMUSICMP3_STATIC_FFMPEG=OFF
+cmake --build MusicToMp3Native/build-dynamic
 ```
 
-发布文件会生成到 `bin/Release/net8.0-windows/win-x64/publish/`。
+该版本运行时需要本机 FFmpeg DLL，不适合作为最终分发包。
 
-## 项目结构
+## 📂 项目结构
 
-| 路径 | 说明 |
-| --- | --- |
-| `MainWindow.xaml` | WPF 界面布局 |
-| `MainWindow.xaml.cs` | 文件管理、进度显示和转换流程 |
-| `NcmDecoder.cs` | `.ncm` 解码逻辑 |
-| `MusicToMp3.csproj` | .NET 8 项目配置 |
+```text
+MusicToMp3Native/
+├─ src/main.cpp             # Win32 界面、文件队列、转换流程
+├─ resources/app.rc         # Windows 应用图标资源
+├─ resources/AppIcon.ico   # 应用图标
+├─ CMakeLists.txt           # CMake 构建配置
+└─ README.md                # 原生项目构建说明
+MusicToMp3Native-Single.exe # 可直接分发的单文件版本
+```
 
-## 许可与隐私
+## 🔐 隐私与许可
 
-本工具只处理本地文件，不收集、不上传用户音乐或转换记录。发布包内的 FFmpeg 遵循其自身开源许可。
+本工具只访问用户主动选择的本地文件，不联网上传音乐内容，不收集个人信息。项目以 [MIT License](LICENSE) 开源，FFmpeg 及其相关组件遵循各自的开源许可。
+
+## 🤝 贡献
+
+欢迎提交 Issue 或 Pull Request。提交代码前，请确保不会把个人音乐文件、构建缓存、FFmpeg 二进制依赖或其他敏感文件加入仓库。
