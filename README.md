@@ -16,15 +16,9 @@
 
 ## 下载使用
 
-发布版位于 [`轻量版/音乐转MP3.exe`](轻量版/音乐转MP3.exe)。
+请前往 [Releases](https://github.com/crazyzhang277/MusicMP3/releases) 下载最新的 `音乐转MP3-win-x64.zip`。
 
-这是依赖 .NET 8 Desktop Runtime 的轻量单文件版本。首次运行前请准备：
-
-1. Windows 10/11
-2. [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
-3. `ffmpeg.exe`：放在 exe 同目录，或加入系统 `PATH`
-
-双击 exe 后，拖入音乐文件，选择输出目录和码率，再点击“开始转换”。
+压缩包已经内置 .NET 运行时和 FFmpeg，Windows 电脑无需另外安装 .NET、FFmpeg 或 Python。下载并解压后，双击 `音乐转MP3.exe`，拖入音乐文件，选择输出目录和码率，再点击“开始转换”。
 
 ## 从源码构建
 
@@ -35,11 +29,11 @@ dotnet build
 dotnet run
 ```
 
-生成轻量单文件发布版：
+生成无需安装 .NET 的自包含版本：
 
 ```powershell
 dotnet publish MusicToMp3.csproj -c Release -r win-x64 `
-  --self-contained false `
+  --self-contained true `
   -p:PublishSingleFile=true `
   -p:IncludeNativeLibrariesForSelfExtract=true
 ```
@@ -54,8 +48,8 @@ dotnet publish MusicToMp3.csproj -c Release -r win-x64 `
 | `MainWindow.xaml.cs` | 文件管理、进度显示和转换流程 |
 | `NcmDecoder.cs` | `.ncm` 解码逻辑 |
 | `MusicToMp3.csproj` | .NET 8 项目配置 |
-| `轻量版/音乐转MP3.exe` | 最新轻量发布版 |
+| `轻量版/音乐转MP3.exe` | 仓库内的快速预览版 |
 
 ## 许可与隐私
 
-本工具只处理本地文件，不收集、不上传用户音乐或转换记录。`ffmpeg` 请根据其自身许可和发行方式使用。
+本工具只处理本地文件，不收集、不上传用户音乐或转换记录。发布包内的 FFmpeg 遵循其自身开源许可。
