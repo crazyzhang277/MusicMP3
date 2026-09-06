@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+bin/
+obj/
+轻量版/*
+!轻量版/
+!轻量版/音乐转MP3.exe
+fixture.mp3
+fixture.ncm
+.scratch/
+test-output/
