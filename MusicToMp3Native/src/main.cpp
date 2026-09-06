@@ -28,6 +28,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
+#include <libavutil/audio_fifo.h>
 #include <libswresample/swresample.h>
 }
 
@@ -208,6 +209,36 @@ std::string utf8(const std::wstring& value) {
 
 void set_status(const std::wstring& text, int progress = -1) {
     PostMessageW(g_main, WM_CONVERT_STATUS, 0, reinterpret_cast<LPARAM>(new StatusMessage{text, progress}));
+}
+
+void handle_output_directory_drop(HWND edit, HDROP drop) {
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    if (count != 1) {
+        SetWindowTextW(g_status, L"请一次拖入一个文件夹作为输出目录");
+        DragFinish(drop);
+        return;
+    }
+    const UINT length = DragQueryFileW(drop, 0, nullptr, 0);
+    std::wstring path(length + 1, L'\0');
+    DragQueryFileW(drop, 0, path.data(), static_cast<UINT>(path.size()));
+    path.resize(length);
+    std::error_code error;
+    if (!fs::is_directory(fs::path(path), error) || error) {
+        SetWindowTextW(g_status, L"只能将文件夹拖到输出目录");
+    } else {
+        SetWindowTextW(edit, path.c_str());
+        SetWindowTextW(g_status, L"输出目录已设置");
+    }
+    DragFinish(drop);
+}
+
+LRESULT CALLBACK output_edit_subclass(HWND edit, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if (message == WM_DROPFILES) {
+        handle_output_directory_drop(edit, reinterpret_cast<HDROP>(wParam));
+        return 0;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(edit, output_edit_subclass, 1);
+    return DefSubclassProc(edit, message, wParam, lParam);
 }
 
 std::wstring extension_lower(const fs::path& path) {
@@ -510,12 +541,15 @@ std::string ffmpeg_error(int code) {
     return buffer;
 }
 
-bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, std::wstring& error) {
+bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, std::wstring& error,
+    const std::string& titleOverride = {}, const std::string& artistOverride = {}, const std::string& albumOverride = {}) {
     AVFormatContext* input = nullptr;
     AVCodecContext* decoder = nullptr;
     AVFormatContext* output = nullptr;
     AVCodecContext* encoder = nullptr;
     SwrContext* resampler = nullptr;
+    AVAudioFifo* fifo = nullptr;
+    AVDictionary* metadata = nullptr;
     AVPacket* packet = av_packet_alloc();
     AVFrame* decoded = av_frame_alloc();
     AVFrame* converted = av_frame_alloc();
@@ -528,6 +562,8 @@ bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, 
     if ((result = avformat_find_stream_info(input, nullptr)) < 0) { error = L"读取音频信息失败：" + widen(ffmpeg_error(result)); goto cleanup; }
     streamIndex = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (streamIndex < 0) { error = L"找不到音频流"; goto cleanup; }
+    av_dict_copy(&metadata, input->metadata, 0);
+    av_dict_copy(&metadata, input->streams[streamIndex]->metadata, AV_DICT_DONT_OVERWRITE);
     {
         const AVCodecParameters* parameters = input->streams[streamIndex]->codecpar;
         const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
@@ -545,18 +581,25 @@ bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, 
         encoder->sample_rate = decoder->sample_rate > 0 ? decoder->sample_rate : 44100;
         encoder->time_base = AVRational{1, encoder->sample_rate};
         encoder->sample_fmt = codec->sample_fmts ? codec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
-        if (decoder->ch_layout.nb_channels > 0) av_channel_layout_copy(&encoder->ch_layout, &decoder->ch_layout);
-        else av_channel_layout_default(&encoder->ch_layout, 2);
+        const int inputChannels = decoder->ch_layout.nb_channels > 0 ? decoder->ch_layout.nb_channels : 2;
+        const int outputChannels = inputChannels == 1 ? 1 : 2;
+        av_channel_layout_default(&encoder->ch_layout, outputChannels);
         AVStream* stream = avformat_new_stream(output, nullptr);
         if (!stream || (result = avcodec_open2(encoder, codec, nullptr)) < 0) { error = L"打开 MP3 编码器失败"; goto cleanup; }
         avcodec_parameters_from_context(stream->codecpar, encoder);
         stream->time_base = AVRational{1, encoder->sample_rate};
         if (!(output->oformat->flags & AVFMT_NOFILE) && (result = avio_open(&output->pb, outputName.c_str(), AVIO_FLAG_WRITE)) < 0) { error = L"无法创建输出文件"; goto cleanup; }
-        AVDictionary* metadata = nullptr;
-        av_dict_set(&metadata, "title", source.stem().string().c_str(), 0);
-        if ((result = avformat_write_header(output, &metadata)) < 0) { error = L"写入 MP3 文件头失败：" + widen(ffmpeg_error(result)); av_dict_free(&metadata); goto cleanup; }
+        const auto fallbackTitle = utf8(source.stem().wstring());
+        if (!titleOverride.empty()) av_dict_set(&metadata, "title", titleOverride.c_str(), 0);
+        else if (!av_dict_get(metadata, "title", nullptr, 0)) av_dict_set(&metadata, "title", fallbackTitle.c_str(), 0);
+        if (!artistOverride.empty()) av_dict_set(&metadata, "artist", artistOverride.c_str(), 0);
+        if (!albumOverride.empty()) av_dict_set(&metadata, "album", albumOverride.c_str(), 0);
+        av_dict_copy(&output->metadata, metadata, 0);
         av_dict_free(&metadata);
+        if ((result = avformat_write_header(output, nullptr)) < 0) { error = L"写入 MP3 文件头失败：" + widen(ffmpeg_error(result)); goto cleanup; }
         if ((result = swr_alloc_set_opts2(&resampler, &encoder->ch_layout, encoder->sample_fmt, encoder->sample_rate, &decoder->ch_layout, decoder->sample_fmt, decoder->sample_rate, 0, nullptr)) < 0 || (result = swr_init(resampler)) < 0) { error = L"初始化音频重采样失败"; goto cleanup; }
+        fifo = av_audio_fifo_alloc(encoder->sample_fmt, encoder->ch_layout.nb_channels, 1);
+        if (!fifo) { error = L"初始化音频缓冲失败"; goto cleanup; }
         int64_t pts = 0;
         auto encode_frame = [&](AVFrame* frame) {
             int r = avcodec_send_frame(encoder, frame);
@@ -569,6 +612,35 @@ bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, 
                 if (r < 0) return r;
             }
             return r == AVERROR(EAGAIN) || r == AVERROR_EOF ? 0 : r;
+        };
+        auto drain_fifo = [&](bool flush) {
+            while (true) {
+                const int available = av_audio_fifo_size(fifo);
+                if (available <= 0 || (!flush && available < encoder->frame_size)) break;
+                const int samples = flush ? std::min(available, encoder->frame_size) : encoder->frame_size;
+                AVFrame* frame = av_frame_alloc();
+                if (!frame) return AVERROR(ENOMEM);
+                frame->format = encoder->sample_fmt;
+                frame->sample_rate = encoder->sample_rate;
+                av_channel_layout_copy(&frame->ch_layout, &encoder->ch_layout);
+                frame->nb_samples = samples;
+                int r = av_frame_get_buffer(frame, 0);
+                if (r >= 0 && av_audio_fifo_read(fifo, reinterpret_cast<void**>(frame->data), samples) != samples)
+                    r = AVERROR(EIO);
+                if (r >= 0) {
+                    frame->pts = pts;
+                    pts += samples;
+                    r = encode_frame(frame);
+                }
+                av_frame_free(&frame);
+                if (r < 0) return r;
+            }
+            return 0;
+        };
+        auto queue_frame = [&](AVFrame* frame) {
+            if (av_audio_fifo_write(fifo, reinterpret_cast<void**>(frame->data), frame->nb_samples) < frame->nb_samples)
+                return AVERROR(EIO);
+            return drain_fifo(false);
         };
         int readResult = 0;
         result = 0;
@@ -588,9 +660,7 @@ bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, 
                     const int convertedSamples = swr_convert(resampler, converted->data, samples, const_cast<const uint8_t**>(decoded->extended_data), decoded->nb_samples);
                     if (convertedSamples < 0) { result = convertedSamples; break; }
                     converted->nb_samples = convertedSamples;
-                    converted->pts = pts;
-                    pts += convertedSamples;
-                    if ((result = encode_frame(converted)) < 0) break;
+                    if ((result = queue_frame(converted)) < 0) break;
                 }
                 if (result >= 0 && decodeResult < 0 && decodeResult != AVERROR(EAGAIN) && decodeResult != AVERROR_EOF)
                     result = decodeResult;
@@ -612,21 +682,20 @@ bool convert_audio(const fs::path& source, const fs::path& target, int bitrate, 
                 if ((result = av_frame_get_buffer(converted, 0)) < 0) break;
                 converted->nb_samples = swr_convert(resampler, converted->data, converted->nb_samples, const_cast<const uint8_t**>(decoded->extended_data), decoded->nb_samples);
                 if (converted->nb_samples < 0) { result = converted->nb_samples; break; }
-                converted->pts = pts;
-                pts += converted->nb_samples;
-                if ((result = encode_frame(converted)) < 0) break;
+                if ((result = queue_frame(converted)) < 0) break;
             }
             if (result >= 0 && decodeResult < 0 && decodeResult != AVERROR(EAGAIN) && decodeResult != AVERROR_EOF)
                 result = decodeResult;
-            if (result >= 0 && (result = encode_frame(nullptr)) >= 0 && (result = av_write_trailer(output)) >= 0)
+            if (result >= 0 && (result = drain_fifo(true)) >= 0 && (result = encode_frame(nullptr)) >= 0 && (result = av_write_trailer(output)) >= 0)
                 success = true;
         }
     }
 cleanup:
     if (!success && error.empty() && result < 0) error = widen("音频转换失败：" + ffmpeg_error(result));
     if (!success && error.empty()) error = L"没有生成有效的音频帧";
-    if (!success && !error.empty()) fs::remove(target);
+    const bool removeIncompleteTarget = !success;
     if (resampler) swr_free(&resampler);
+    if (fifo) av_audio_fifo_free(fifo);
     if (encoder) avcodec_free_context(&encoder);
     if (decoder) avcodec_free_context(&decoder);
     if (input) avformat_close_input(&input);
@@ -637,6 +706,11 @@ cleanup:
     av_frame_free(&decoded);
     av_frame_free(&converted);
     av_packet_free(&packet);
+    av_dict_free(&metadata);
+    if (removeIncompleteTarget) {
+        std::error_code removeError;
+        fs::remove(target, removeError);
+    }
     return success;
 }
 
@@ -672,7 +746,7 @@ void convert_all(int bitrate) {
             source = track.audioPath;
         }
         fs::path target = outputDirectory / (outputStem + L".mp3");
-        if (!convert_audio(source, target, bitrate, error)) {
+        if (!convert_audio(source, target, bitrate, error, track.title, track.artist, track.album)) {
             ++failures;
             const auto detail = L"失败：" + paths[i].filename().wstring() + L" - " + error;
             failureDetails += detail + L"\n";
@@ -696,7 +770,17 @@ void begin_conversion() {
     SendMessageW(g_progress, PBM_SETPOS, 0, 0);
     EnableWindow(GetDlgItem(g_main, IDC_CONVERT), FALSE);
     const int bitrate = selected_bitrate();
-    std::thread([bitrate] { convert_all(bitrate); }).detach();
+    std::thread([bitrate] {
+        try {
+            convert_all(bitrate);
+        } catch (const std::exception& exception) {
+            set_status(L"转换线程异常：" + widen(exception.what()));
+            PostMessageW(g_main, WM_CONVERT_DONE, 0, 0);
+        } catch (...) {
+            set_status(L"转换线程发生未知异常");
+            PostMessageW(g_main, WM_CONVERT_DONE, 0, 0);
+        }
+    }).detach();
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -735,6 +819,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         make_static(L"输出目录", 44, 468, 82, 24, IDC_OUTPUT_LABEL, g_sectionFont);
         g_output = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"%USERPROFILE%\\Music\\MP3", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 142, 462, 596, 32, window, reinterpret_cast<HMENU>(IDC_OUTPUT), nullptr, nullptr);
         apply_font(g_output);
+        DragAcceptFiles(g_output, TRUE);
+        SetWindowSubclass(g_output, output_edit_subclass, 1, 0);
         make_button(L"选择目录", 752, 460, 148, 36, IDC_BROWSE);
         make_static(L"码率", 44, 512, 82, 24, IDC_BITRATE_LABEL, g_sectionFont);
         g_bitrate = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 142, 506, 170, 160, window, reinterpret_cast<HMENU>(IDC_BITRATE), nullptr, nullptr);
@@ -794,6 +880,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         break;
     case WM_DROPFILES: {
         HDROP drop = reinterpret_cast<HDROP>(wParam);
+        POINT dropPoint{};
+        if (DragQueryPoint(drop, &dropPoint)) {
+            ClientToScreen(window, &dropPoint);
+            const HWND target = WindowFromPoint(dropPoint);
+            if (target == g_output || IsChild(g_output, target)) {
+                handle_output_directory_drop(g_output, drop);
+                break;
+            }
+        }
         const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
         std::vector<fs::path> paths;
         for (UINT i = 0; i < count; ++i) { wchar_t path[MAX_PATH * 4]{}; DragQueryFileW(drop, i, path, std::size(path)); paths.emplace_back(path); }
@@ -866,6 +961,22 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    HANDLE instanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\MusicToMp3Native.SingleInstance");
+    if (!instanceMutex) return 1;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = nullptr;
+        for (int attempt = 0; attempt < 20 && !existing; ++attempt) {
+            existing = FindWindowW(L"MusicToMp3NativeWindow", nullptr);
+            if (!existing) Sleep(50);
+        }
+        if (existing) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+            FlashWindow(existing, TRUE);
+        }
+        CloseHandle(instanceMutex);
+        return 0;
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS};
@@ -876,15 +987,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     klass.lpfnWndProc = window_proc;
     klass.lpszClassName = L"MusicToMp3NativeWindow";
     klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    klass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_ICON1));
-    klass.hIconSm = klass.hIcon;
+    HICON largeIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    HICON smallIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!largeIcon) largeIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_ICON1));
+    if (!smallIcon) smallIcon = largeIcon;
+    klass.hIcon = largeIcon;
+    klass.hIconSm = smallIcon;
     klass.hbrBackground = nullptr;
     RegisterClassExW(&klass);
     HWND window = CreateWindowW(klass.lpszClassName, L"音乐转 MP3（原生版）", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 861, 672, nullptr, nullptr, instance, nullptr);
+    if (window) {
+        if (largeIcon) SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
+        if (smallIcon) SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
+    }
     ShowWindow(window, show);
     UpdateWindow(window);
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     CoUninitialize();
+    if (smallIcon && smallIcon != largeIcon) DestroyIcon(smallIcon);
+    if (largeIcon) DestroyIcon(largeIcon);
+    CloseHandle(instanceMutex);
     return static_cast<int>(message.wParam);
 }
