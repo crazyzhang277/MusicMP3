@@ -48,7 +48,6 @@ dotnet publish MusicToMp3.csproj -c Release -r win-x64 `
 | `MainWindow.xaml.cs` | 文件管理、进度显示和转换流程 |
 | `NcmDecoder.cs` | `.ncm` 解码逻辑 |
 | `MusicToMp3.csproj` | .NET 8 项目配置 |
-| `轻量版/音乐转MP3.exe` | 仓库内的快速预览版 |
 
 ## 许可与隐私
 
